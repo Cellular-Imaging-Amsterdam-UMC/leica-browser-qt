@@ -1,0 +1,22 @@
+# Build artifacts
+dist/
+build/
+*.egg-info/
+src/*.egg-info/
+
+# Byte-compiled / cached
+__pycache__/
+*.py[cod]
+
+# Test/cache output
+.pytest_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
