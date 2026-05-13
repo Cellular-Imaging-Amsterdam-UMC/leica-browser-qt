@@ -315,15 +315,14 @@ class LeicaGateway:
         return np.asarray(preview_path)
 
     def read_plane(self, context: LeicaImageContext, z: int = 0, c: int = 0, t: int = 0):
-        raise NotImplementedError(
-            "Direct plane reading is not implemented yet. The selected LeicaImageContext "
-            "contains stable metadata and paths for a caller-owned backend."
-        )
+        from .leica_pixels import read_leica_plane
+
+        return read_leica_plane(context, z=z, c=c, t=t)
 
     def read_array(self, context: LeicaImageContext):
-        raise NotImplementedError(
-            "Full-array reading is intentionally deferred for the first browser release."
-        )
+        from .leica_pixels import read_leica_array
+
+        return read_leica_array(context)
 
     @staticmethod
     def _ignore_name(name: str) -> bool:

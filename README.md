@@ -3,8 +3,9 @@
 Reusable PyQt6 dialog for browsing Leica `.lif`, `.xlef`, and standalone `.lof`
 files and returning selected image contexts to another application.
 
-The first release is focused on browsing, previewing, metadata inspection, and
-selection. Conversion to OME-TIFF remains outside this package.
+The browser is focused on browsing, previewing, metadata inspection, selection,
+and direct NumPy pixel reads. Conversion to OME-TIFF remains outside this
+package.
 
 ## Install
 
@@ -90,7 +91,7 @@ def open_leica_single(parent):
     if ctx is None:
         return None
     handle = ctx.open()
-    return handle.read_array(), ctx.metadata
+    return handle.read_array(), ctx.metadata  # TCZYX NumPy array
 
 
 def open_leica_multiple(parent):
@@ -104,6 +105,8 @@ def open_leica_multiple(parent):
 
 ## Known Limitations
 
-- Pixel reading beyond previews is represented by the handle API but deferred.
+- `read_array()` returns a full in-memory `TCZYX` NumPy array. For large Leica
+  datasets, prefer `read_plane()` or `read_stack()` to avoid loading all
+  timepoints and channels at once.
 - Tests use mocked parser output and fake Leica paths unless local Leica test
   data is supplied by a downstream project.

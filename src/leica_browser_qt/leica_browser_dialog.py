@@ -178,12 +178,14 @@ class LeicaBrowserDialog(QDialog):
         self.metadata_table.verticalHeader().setVisible(False)
         preview_layout.addWidget(self.metadata_table, 1)
         right_split.addWidget(preview)
-        right_split.setStretchFactor(0, 3)
-        right_split.setStretchFactor(1, 2)
+        right_split.setStretchFactor(0, 36)
+        right_split.setStretchFactor(1, 64)
+        right_split.setSizes([265, 480])
 
         splitter.addWidget(right_split)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(0, 36)
+        splitter.setStretchFactor(1, 64)
+        splitter.setSizes([425, 745])
         outer.addWidget(splitter, 1)
 
         footer = QHBoxLayout()

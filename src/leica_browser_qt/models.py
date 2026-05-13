@@ -69,6 +69,11 @@ class LeicaImageHandle:
 
         return LeicaGateway().read_plane(self.context, z=z, c=c, t=t)
 
+    def read_stack(self, c: int = 0, t: int = 0, progress=None):
+        from .leica_pixels import read_leica_stack
+
+        return read_leica_stack(self.context, c=c, t=t, progress=progress)
+
     def read_array(self):
         from .leica_gateway import LeicaGateway
 
@@ -76,4 +81,3 @@ class LeicaImageHandle:
 
     def read_lazy(self):
         raise NotImplementedError("Lazy Leica reading is not implemented in this first browser release.")
-
