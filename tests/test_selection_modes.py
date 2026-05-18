@@ -6,6 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtWidgets import QApplication
 
 from leica_browser_qt import LeicaBrowserDialog, LeicaGateway
+from leica_browser_qt.leica_browser_dialog import MAX_RECENT_ROOTS, RECENT_ROOTS_KEY
 from leica_browser_qt.leica_gateway import LeicaTreeNode
 from leica_browser_qt.models import LeicaImageContext
 
@@ -50,6 +51,52 @@ class StaticGateway(LeicaGateway):
         return super().hydrate_image_node(node)
 
 
+class SingleImageGateway(StaticGateway):
+    def container_node(self, path):
+        path = Path(path)
+        ctx = LeicaImageContext(
+            name="Only Image",
+            container_path=path,
+            internal_path=f"{path.name}/Only Image",
+            image_id="only",
+            kind="lif-image",
+            metadata={"xs": 1, "ys": 1},
+        )
+        return LeicaTreeNode(
+            name=path.name,
+            kind="container",
+            path=path,
+            children=[LeicaTreeNode(name="Only Image", kind="lif-image", context=ctx)],
+        )
+
+
+class SingleNestedImageGateway(StaticGateway):
+    def container_node(self, path):
+        path = Path(path)
+        ctx = LeicaImageContext(
+            name="Nested Image",
+            container_path=path,
+            internal_path=f"{path.name}/Folder/Nested Image",
+            image_id="nested",
+            kind="lif-image",
+            metadata={"xs": 1, "ys": 1},
+        )
+        return LeicaTreeNode(
+            name=path.name,
+            kind="container",
+            path=path,
+            children=[
+                LeicaTreeNode(
+                    name="Folder",
+                    kind="folder",
+                    path=path,
+                    image_id="folder",
+                    children=[LeicaTreeNode(name="Nested Image", kind="lif-image", context=ctx)],
+                )
+            ],
+        )
+
+
 def app():
     global _APP
     _APP = QApplication.instance() or _APP or QApplication([])
@@ -91,6 +138,45 @@ def test_multi_select_returns_list(tmp_path):
     finally:
         if dialog._preview_worker is not None:
             dialog._preview_worker.wait(3000)
+        dialog.close()
+
+
+def test_single_root_image_is_auto_selected(tmp_path):
+    app()
+    lif = tmp_path / "a.lif"
+    lif.write_bytes(b"fake")
+    dialog = LeicaBrowserDialog(roots=[tmp_path], selection_mode="single", gateway=SingleImageGateway())
+    try:
+        dialog.load_file_images(lif)
+
+        root = dialog.tree_images.topLevelItem(0)
+        only_image = root.child(0)
+
+        assert only_image.isSelected()
+        assert dialog.tree_images.currentItem() is only_image
+        assert [ctx.name for ctx in dialog._selected_contexts(hydrate=False)] == ["Only Image"]
+        assert dialog.ok_button.isEnabled()
+    finally:
+        if dialog._preview_worker is not None:
+            dialog._preview_worker.wait(3000)
+        dialog.close()
+
+
+def test_single_nested_image_is_not_auto_selected(tmp_path):
+    app()
+    lif = tmp_path / "a.lif"
+    lif.write_bytes(b"fake")
+    dialog = LeicaBrowserDialog(roots=[tmp_path], selection_mode="single", gateway=SingleNestedImageGateway())
+    try:
+        dialog.load_file_images(lif)
+
+        root = dialog.tree_images.topLevelItem(0)
+        folder = root.child(0)
+
+        assert not folder.isSelected()
+        assert dialog._selected_contexts(hydrate=False) == []
+        assert not dialog.ok_button.isEnabled()
+    finally:
         dialog.close()
 
 
@@ -143,4 +229,61 @@ def test_unreadable_remembered_root_falls_back_home(tmp_path, monkeypatch):
         )
         assert dialog._initial_root(None) == Path.home()
     finally:
+        dialog.close()
+
+
+def test_browse_choices_are_kept_as_max_ten_recent_folders(tmp_path, monkeypatch):
+    app()
+    folders = []
+    for idx in range(12):
+        folder = tmp_path / f"folder-{idx}"
+        folder.mkdir()
+        folders.append(folder)
+
+    dialog = LeicaBrowserDialog(roots=[tmp_path], selection_mode="single", gateway=StaticGateway())
+    try:
+        dialog._settings.remove(RECENT_ROOTS_KEY)
+        dialog._recent_roots = []
+        dialog._refresh_recent_roots_combo()
+
+        choices = iter(str(folder) for folder in folders)
+        monkeypatch.setattr(
+            "leica_browser_qt.leica_browser_dialog.QFileDialog.getExistingDirectory",
+            lambda *args: next(choices),
+        )
+
+        for _ in folders:
+            dialog.choose_root()
+
+        expected = [str(folder) for folder in reversed(folders[-MAX_RECENT_ROOTS:])]
+        stored = dialog._settings.value(RECENT_ROOTS_KEY, [])
+
+        assert [str(root) for root in dialog._recent_roots] == expected
+        assert list(stored) == expected
+        assert dialog.recent_roots_combo.count() == MAX_RECENT_ROOTS
+    finally:
+        dialog._settings.remove(RECENT_ROOTS_KEY)
+        dialog.close()
+
+
+def test_recent_folder_selection_changes_root(tmp_path):
+    app()
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+
+    dialog = LeicaBrowserDialog(roots=[tmp_path], selection_mode="single", gateway=StaticGateway())
+    try:
+        dialog._settings.remove(RECENT_ROOTS_KEY)
+        dialog._recent_roots = [first, second]
+        dialog._refresh_recent_roots_combo()
+
+        dialog.recent_roots_combo.setCurrentIndex(1)
+
+        assert dialog._current_root == second
+        assert dialog.lbl_root.text() == f"Root: {second}"
+        assert dialog.tree_fs.topLevelItem(0).text(0) == str(second)
+    finally:
+        dialog._settings.remove(RECENT_ROOTS_KEY)
         dialog.close()

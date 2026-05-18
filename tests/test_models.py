@@ -45,9 +45,13 @@ def test_metadata_summary_prefers_convertleica_fields():
     )
 
     assert "Name: Scene 1" in summary
+    assert "UUID:" not in summary
+    assert summary.splitlines()[1] == "Date: 2026-05-18 10:20:30"
     assert "Dimensions: 512 x 256  Z=4  T=2  C=3" in summary
+    assert "Pixel size: X=0.25 micrometer, Y=0.25 micrometer" in summary
+    assert "FOV size: 8192 um^2" in summary
+    assert "Image size: 6.3 MB" in summary
     assert "Pixel type: 16-bit" in summary
-    assert "Date: 2026-05-18 10:20:30" in summary
 
 
 def test_resolution_metadata_fallback_converts_native_spatial_units():
@@ -86,6 +90,6 @@ def test_context_uses_normalized_resolution_metadata():
 
     assert ctx.pixel_size_x_um == 0.25
     assert ctx.pixel_size_y_um == 0.25
-    assert format_metadata_summary(ctx.metadata).splitlines()[3] == (
-        "Voxel size: X=0.25 micrometer, Y=0.25 micrometer"
+    assert format_metadata_summary(ctx.metadata).splitlines()[2] == (
+        "Pixel size: X=0.25 micrometer, Y=0.25 micrometer"
     )

@@ -11,6 +11,7 @@ from PyQt6.QtCore import QEventLoop, QSettings, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -38,6 +39,8 @@ from .preview import preview_png_from_metadata
 NODE_ROLE = int(Qt.ItemDataRole.UserRole)
 CONTEXT_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 PLACEHOLDER_TEXT = "..."
+RECENT_ROOTS_KEY = "recent_roots"
+MAX_RECENT_ROOTS = 10
 
 
 class PreviewWorker(QThread):
@@ -111,6 +114,7 @@ class LeicaBrowserDialog(QDialog):
         self._settings = QSettings("NL-BioImaging", "leica-browser-qt")
         self._current_root = self._initial_root(root_list)
         self._initial_files = self._initial_file_roots(root_list)
+        self._recent_roots = self._load_recent_roots()
 
         self.setWindowTitle("Browse Leica Images")
         self.setWindowIcon(self._asset_icon("app-icon.png"))
@@ -133,6 +137,16 @@ class LeicaBrowserDialog(QDialog):
         self.btn_browse_root.setFixedWidth(100)
         self.btn_browse_root.clicked.connect(self.choose_root)
         top.addWidget(self.btn_browse_root)
+
+        top.addWidget(QLabel("Recent:"))
+        self.recent_roots_combo = QComboBox()
+        self.recent_roots_combo.setMinimumWidth(220)
+        self.recent_roots_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.recent_roots_combo.currentIndexChanged.connect(self.on_recent_root_selected)
+        top.addWidget(self.recent_roots_combo)
+        self._refresh_recent_roots_combo()
 
         self.lbl_root = QLabel(f"Root: {self._current_root}")
         self.lbl_root.setWordWrap(True)
@@ -229,7 +243,7 @@ class LeicaBrowserDialog(QDialog):
         self.setStyleSheet(
             "QDialog { background: #202020; color: #f0f0f0; }"
             "QLabel { color: #f0f0f0; }"
-            "QTreeWidget, QTableWidget, QTextEdit, QLineEdit {"
+            "QTreeWidget, QTableWidget, QTextEdit, QLineEdit, QComboBox {"
             "background: #2d2d2d; color: #f7f7f7; border: 1px solid #555;"
             "selection-background-color: #3d5068; }"
             "QHeaderView::section { background: #1e293b; color: #e2e8f0; border: 0; padding: 4px; }"
@@ -272,8 +286,28 @@ class LeicaBrowserDialog(QDialog):
         if chosen:
             self._current_root = Path(chosen)
             self._remember_root(self._current_root)
+            self._remember_recent_root(self._current_root)
             self.lbl_root.setText(f"Root: {self._current_root}")
             self.refresh()
+
+    def on_recent_root_selected(self, index: int) -> None:
+        path_text = self.recent_roots_combo.itemData(index)
+        if not path_text:
+            return
+        path = Path(str(path_text)).expanduser()
+        if path == self._current_root:
+            return
+        if not self._is_usable_root(path):
+            self._recent_roots = [
+                root for root in self._recent_roots if self._path_key(root) != self._path_key(path)
+            ]
+            self._store_recent_roots()
+            self._refresh_recent_roots_combo()
+            return
+        self._current_root = path
+        self._remember_root(self._current_root)
+        self.lbl_root.setText(f"Root: {self._current_root}")
+        self.refresh()
 
     def refresh(self) -> None:
         self.populate_fs_root()
@@ -377,6 +411,7 @@ class LeicaBrowserDialog(QDialog):
         self.tree_images.expandItem(root_item)
         self.preview_label.setText("Select an image to preview it")
         self.apply_content_filter()
+        self._auto_select_single_root_image(root_item)
         self._update_ok_state()
 
     def _content_item_from_node(self, node: LeicaTreeNode, *, is_root: bool = False) -> QTreeWidgetItem:
@@ -401,6 +436,16 @@ class LeicaBrowserDialog(QDialog):
         if node.kind == "folder" and not node.children:
             item.addChild(QTreeWidgetItem([PLACEHOLDER_TEXT]))
         return item
+
+    def _auto_select_single_root_image(self, root_item: QTreeWidgetItem) -> None:
+        if root_item.childCount() != 1:
+            return
+        image_item = root_item.child(0)
+        if not isinstance(image_item.data(0, CONTEXT_ROLE), LeicaImageContext):
+            return
+        self.tree_images.clearSelection()
+        self.tree_images.setCurrentItem(image_item)
+        image_item.setSelected(True)
 
     def on_content_item_expanded(self, item: QTreeWidgetItem) -> None:
         node = item.data(0, NODE_ROLE)
@@ -609,6 +654,68 @@ class LeicaBrowserDialog(QDialog):
     def _remember_root(self, root: Path) -> None:
         if self._is_usable_root(root):
             self._settings.setValue("last_root", str(root))
+
+    def _load_recent_roots(self) -> list[Path]:
+        raw_roots = self._settings.value(RECENT_ROOTS_KEY, [])
+        if isinstance(raw_roots, str):
+            values = [raw_roots] if raw_roots else []
+        else:
+            try:
+                values = list(raw_roots)
+            except TypeError:
+                values = []
+
+        roots: list[Path] = []
+        seen: set[str] = set()
+        for value in values:
+            path = Path(str(value)).expanduser()
+            key = self._path_key(path)
+            if key in seen or not self._is_usable_root(path):
+                continue
+            seen.add(key)
+            roots.append(path)
+            if len(roots) >= MAX_RECENT_ROOTS:
+                break
+        return roots
+
+    def _remember_recent_root(self, root: Path) -> None:
+        if not self._is_usable_root(root):
+            return
+        root_key = self._path_key(root)
+        self._recent_roots = [
+            existing for existing in self._recent_roots if self._path_key(existing) != root_key
+        ]
+        self._recent_roots.insert(0, root)
+        self._recent_roots = self._recent_roots[:MAX_RECENT_ROOTS]
+        self._store_recent_roots()
+        self._refresh_recent_roots_combo()
+
+    def _store_recent_roots(self) -> None:
+        self._settings.setValue(RECENT_ROOTS_KEY, [str(root) for root in self._recent_roots])
+
+    def _refresh_recent_roots_combo(self) -> None:
+        self.recent_roots_combo.blockSignals(True)
+        self.recent_roots_combo.clear()
+        if not self._recent_roots:
+            self.recent_roots_combo.addItem("No recent folders", None)
+            self.recent_roots_combo.setEnabled(False)
+        else:
+            self.recent_roots_combo.setEnabled(True)
+            current_key = self._path_key(self._current_root)
+            current_index = -1
+            for root in self._recent_roots:
+                self.recent_roots_combo.addItem(str(root), str(root))
+                if self._path_key(root) == current_key:
+                    current_index = self.recent_roots_combo.count() - 1
+            self.recent_roots_combo.setCurrentIndex(current_index)
+        self.recent_roots_combo.blockSignals(False)
+
+    @staticmethod
+    def _path_key(path: Path) -> str:
+        try:
+            return str(path.expanduser().resolve())
+        except OSError:
+            return str(path.expanduser())
 
     def _is_usable_root(self, root: Path) -> bool:
         """Return True when a remembered folder still looks readable/useful."""

@@ -141,7 +141,6 @@ def format_metadata_summary(metadata: dict[str, Any]) -> str:
 
     metadata = normalize_resolution_metadata(metadata)
     name = pick(metadata, "save_child_name", "name", "ElementName", default="(unnamed)")
-    uuid = pick(metadata, "uuid", "UniqueID", "ImageUUID", default="")
 
     dims = metadata.get("dimensions") if isinstance(metadata.get("dimensions"), dict) else {}
     xs = pick(metadata, "xs", "size_x", default=dims.get("x"))
@@ -199,20 +198,92 @@ def format_metadata_summary(metadata: dict[str, Any]) -> str:
 
     lines = [
         f"Name: {name}",
-        f"UUID: {uuid}" if uuid else "UUID: (n/a)",
-        f"Dimensions: {'  '.join(dims_parts)}" if dims_parts else "Dimensions: (n/a)",
-        f"Voxel size: {', '.join(scale_parts)}" if scale_parts else "Voxel size: (n/a)",
-        f"Pixel type: {pixel_type}" if pixel_type else "Pixel type: (n/a)",
     ]
-
-    experiment = pick(metadata, "experiment_name")
-    if experiment:
-        lines.append(f"Experiment: {experiment}")
 
     date_text = _format_datetime(pick(metadata, "experiment_datetime", "experiment_datetime_str"))
     if date_text:
         lines.append(f"Date: {date_text}")
+
+    fov_size = _format_fov_size_um2(xs, ys, vx, vy)
+    image_size = _format_image_size(xs, ys, zs, ts, cs, channel_resolution)
+
+    lines.extend(
+        [
+            f"Dimensions: {'  '.join(dims_parts)}" if dims_parts else "Dimensions: (n/a)",
+            f"Pixel size: {', '.join(scale_parts)}" if scale_parts else "Pixel size: (n/a)",
+            f"FOV size: {fov_size}" if fov_size else "FOV size: (n/a)",
+            f"Image size: {image_size}" if image_size else "Image size: (n/a)",
+            f"Pixel type: {pixel_type}" if pixel_type else "Pixel type: (n/a)",
+        ]
+    )
+
+    experiment = pick(metadata, "experiment_name")
+    if experiment:
+        lines.append(f"Experiment: {experiment}")
     return "\n".join(lines)
+
+
+def _format_fov_size_um2(xs: Any, ys: Any, vx: Any, vy: Any) -> str | None:
+    size_x = as_int(xs)
+    size_y = as_int(ys)
+    pixel_x = as_float(vx)
+    pixel_y = as_float(vy)
+    if not size_x or not size_y or not pixel_x or not pixel_y:
+        return None
+    return f"{_format_decimal(size_x * pixel_x * size_y * pixel_y)} um^2"
+
+
+def _format_image_size(
+    xs: Any,
+    ys: Any,
+    zs: Any,
+    ts: Any,
+    cs: Any,
+    channel_resolution: Any,
+) -> str | None:
+    size_x = as_int(xs)
+    size_y = as_int(ys)
+    size_z = as_int(zs) or 1
+    size_t = as_int(ts) or 1
+    channels = as_int(cs)
+    if not size_x or not size_y:
+        return None
+
+    bit_depths = _channel_bit_depths(channel_resolution, channels)
+    if not bit_depths:
+        return None
+
+    bytes_per_xyzt = sum((bits + 7) // 8 for bits in bit_depths)
+    byte_count = size_x * size_y * size_z * size_t * bytes_per_xyzt
+    return _format_byte_size(byte_count)
+
+
+def _channel_bit_depths(channel_resolution: Any, channels: int | None) -> list[int]:
+    if isinstance(channel_resolution, list):
+        bit_depths = [as_int(value) for value in channel_resolution]
+        bit_depths = [value for value in bit_depths if value]
+        if not bit_depths:
+            return []
+        if channels and len(bit_depths) == 1:
+            return bit_depths * channels
+        if channels and len(bit_depths) < channels:
+            return bit_depths + [bit_depths[-1]] * (channels - len(bit_depths))
+        return bit_depths[:channels] if channels else bit_depths
+
+    bit_depth = as_int(channel_resolution)
+    if bit_depth:
+        return [bit_depth] * (channels or 1)
+    return []
+
+
+def _format_byte_size(byte_count: int) -> str:
+    if byte_count >= 1_000_000_000:
+        return f"{byte_count / 1_000_000_000:.2f} GB"
+    return f"{byte_count / 1_000_000:.1f} MB"
+
+
+def _format_decimal(value: float) -> str:
+    return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
 def _format_datetime(value: Any) -> str | None:
