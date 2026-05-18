@@ -196,8 +196,52 @@ def read_leica_lif(file_path, include_xmlelement=False, image_uuid=None, folder_
          # Ignore errors during extraction, proceed without this info
          pass
 
-    # Do not scan memory blocks unless an image is requested
+    # The lightweight XML metadata is enough for the tree, but previews also
+    # need binary block positions. This scan seeks over pixel payloads without
+    # reading them, so it is much cheaper than full image metadata parsing.
     blockid_to_lifinfo = {}
+
+    def scan_memory_blocks() -> dict:
+        try:
+            with open(file_path, 'rb') as f:
+                # Skip header and XML payload
+                _ = struct.unpack('i', f.read(4))[0]
+                _ = struct.unpack('i', f.read(4))[0]  # XMLContentLength
+                _ = struct.unpack('B', f.read(1))[0]
+                xml_len = struct.unpack('i', f.read(4))[0]
+                f.seek(xml_len * 2, os.SEEK_CUR)
+
+                scanned_map = {}
+                while True:
+                    data = f.read(4)
+                    if not data:
+                        break
+                    marker = struct.unpack('i', data)[0]
+                    if marker != 112:
+                        raise ValueError('Error Opening LIF-File: {}'.format(file_path))
+                    _ = struct.unpack('i', f.read(4))[0]  # BinContentLength
+                    star = struct.unpack('B', f.read(1))[0]
+                    if star != 42:
+                        raise ValueError('Error Opening LIF-File: {}'.format(file_path))
+                    memory_size = struct.unpack('q', f.read(8))[0]
+                    star = struct.unpack('B', f.read(1))[0]
+                    if star != 42:
+                        raise ValueError('Error Opening LIF-File: {}'.format(file_path))
+                    block_id_length = struct.unpack('i', f.read(4))[0]
+                    block_id_data = f.read(block_id_length * 2)
+                    block_id = block_id_data.decode('utf-16')
+                    position = f.tell()
+                    scanned_map[block_id] = {
+                        'BlockID': block_id,
+                        'MemorySize': memory_size,
+                        'Position': position,
+                        'LIFFile': file_path
+                    }
+                    if memory_size > 0:
+                        f.seek(memory_size, os.SEEK_CUR)
+            return scanned_map
+        except Exception:
+            return {}
 
     # Lightweight helpers to avoid deep traversal work unless requested
     def child_elements(el: ET.Element):
@@ -282,48 +326,7 @@ def read_leica_lif(file_path, include_xmlelement=False, image_uuid=None, folder_
 
     # Image request: return only that image's metadata
     if image_uuid is not None:
-        # Lazily scan memory blocks only for image requests
-        try:
-            with open(file_path, 'rb') as f:
-                # Skip header and XML payload
-                _ = struct.unpack('i', f.read(4))[0]
-                _ = struct.unpack('i', f.read(4))[0]  # XMLContentLength
-                _ = struct.unpack('B', f.read(1))[0]
-                xml_len = struct.unpack('i', f.read(4))[0]
-                f.seek(xml_len * 2, os.SEEK_CUR)
-
-                scanned_map = {}
-                while True:
-                    data = f.read(4)
-                    if not data:
-                        break
-                    marker = struct.unpack('i', data)[0]
-                    if marker != 112:
-                        raise ValueError('Error Opening LIF-File: {}'.format(file_path))
-                    _ = struct.unpack('i', f.read(4))[0]  # BinContentLength
-                    star = struct.unpack('B', f.read(1))[0]
-                    if star != 42:
-                        raise ValueError('Error Opening LIF-File: {}'.format(file_path))
-                    MemorySize = struct.unpack('q', f.read(8))[0]
-                    star = struct.unpack('B', f.read(1))[0]
-                    if star != 42:
-                        raise ValueError('Error Opening LIF-File: {}'.format(file_path))
-                    BlockIDLength = struct.unpack('i', f.read(4))[0]
-                    BlockIDData = f.read(BlockIDLength * 2)
-                    BlockID = BlockIDData.decode('utf-16')
-                    position = f.tell()
-                    scanned_map[BlockID] = {
-                        'BlockID': BlockID,
-                        'MemorySize': MemorySize,
-                        'Position': position,
-                        'LIFFile': file_path
-                    }
-                    if MemorySize > 0:
-                        f.seek(MemorySize, os.SEEK_CUR)
-            # Rebind the lookup so make_image_meta can use it
-            blockid_to_lifinfo = scanned_map
-        except Exception:
-            blockid_to_lifinfo = {}
+        blockid_to_lifinfo = scan_memory_blocks()
         root_el = xml_root.find('Element')
         if root_el is None:
             raise ValueError('Invalid LIF XML: missing root Element')
@@ -337,6 +340,7 @@ def read_leica_lif(file_path, include_xmlelement=False, image_uuid=None, folder_
 
     # Folder request: return folder with direct children only
     if folder_uuid is not None:
+        blockid_to_lifinfo = scan_memory_blocks()
         root_el = xml_root.find('Element')
         if root_el is None:
             raise ValueError('Invalid LIF XML: missing root Element')
@@ -366,6 +370,7 @@ def read_leica_lif(file_path, include_xmlelement=False, image_uuid=None, folder_
         return json.dumps(node, indent=2)
 
     # Default: return top-level (first-level) children only
+    blockid_to_lifinfo = scan_memory_blocks()
     root_el = xml_root.find('Element')
     node = {
         'type': 'File',

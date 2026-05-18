@@ -7,8 +7,10 @@ from urllib.parse import unquote
 from collections import deque
 try:
     from .ParseLeicaImageXML import parse_image_xml
+    from .ParseLeicaImageXMLLite import parse_image_xml_lite
 except ImportError:  # pragma: no cover - fallback for script usage
     from ParseLeicaImageXML import parse_image_xml
+    from ParseLeicaImageXMLLite import parse_image_xml_lite
 from datetime import timezone # Import timezone
 import datetime
 
@@ -363,6 +365,18 @@ def _build_children_list(element, base_file, top_file, experiment_name, experime
         # Add filetype if available from metadata
         if 'filetype' in metadata:
              child_node['filetype'] = metadata['filetype']
+        for preview_key in (
+            'channelResolution',
+            'channelbytesinc',
+            'lutname',
+            'xbytesinc',
+            'ybytesinc',
+            'zbytesinc',
+            'tbytesinc',
+            'tilesbytesinc',
+        ):
+            if preview_key in metadata:
+                child_node[preview_key] = metadata[preview_key]
 
         children_list.append(child_node)
 
@@ -420,6 +434,10 @@ def get_element_metadata(file_path, target_uuid=None):
     element = root.find(f".//Element[@UniqueID='{target_uuid}']") if target_uuid else root.find(".//Element")
     if element is not None:
         metadata["ElementName"] = element.get("Name", "Unnamed")
+        try:
+            metadata.update(parse_image_xml_lite(element))
+        except Exception:
+            pass
     
     memory_block = root.find('.//Memory/Block')
     if memory_block is not None:
@@ -428,7 +446,11 @@ def get_element_metadata(file_path, target_uuid=None):
             block_file = unquote(block_file).replace("\\", "/")
             metadata["LOFFile"] = block_file
     
-    image_description = root.find('.//ImageDescription')
+    image_description = (
+        element.find('.//ImageDescription')
+        if element is not None
+        else root.find('.//ImageDescription')
+    )
     if image_description is not None:
         dimensions_element = image_description.find('Dimensions')
         if dimensions_element is not None:

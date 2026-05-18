@@ -36,6 +36,15 @@ class FakeAdapter:
         }
 
 
+class CountingAdapter(FakeAdapter):
+    def __init__(self):
+        self.image_metadata_reads = 0
+
+    def read_image_metadata(self, path, image_uuid, folder_metadata=None):
+        self.image_metadata_reads += 1
+        return super().read_image_metadata(path, image_uuid, folder_metadata)
+
+
 def test_scans_single_lif(tmp_path):
     lif = tmp_path / "sample.lif"
     lif.write_bytes(b"fake")
@@ -45,6 +54,25 @@ def test_scans_single_lif(tmp_path):
     assert nodes[0].name == "sample.lif"
     assert nodes[0].children[0].context.name == "Image A"
     assert nodes[0].children[0].context.size_x == 64
+
+
+def test_container_tree_uses_lightweight_image_metadata_until_hydrated(tmp_path):
+    lif = tmp_path / "sample.lif"
+    lif.write_bytes(b"fake")
+    adapter = CountingAdapter()
+    gateway = LeicaGateway(adapter=adapter)
+
+    node = gateway.container_node(lif)
+
+    assert adapter.image_metadata_reads == 0
+    assert node.children[0].context.size_x == 64
+    assert node.children[0].metadata_loaded is False
+
+    context = gateway.hydrate_image_node(node.children[0])
+
+    assert adapter.image_metadata_reads == 1
+    assert context.size_z == 3
+    assert node.children[0].metadata_loaded is True
 
 
 def test_scans_single_xlef(tmp_path):

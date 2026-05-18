@@ -5,6 +5,7 @@ Fast, lightweight Leica image XML parser for listing/preview.
 Extracts only the minimal metadata needed for UI listing and quick previews:
 - dimensions: xs, ys, zs, ts, tiles, channels, isrgb
 - pixel sizes: xres, yres, zres and units, plus micrometer-converted xres2/yres2/zres2
+- preview offsets: channel/z/t/tile byte increments and channel bit depth
 - a consolidated dimensions dict
 
 This intentionally avoids scanning Attachments, LUTs, tiles, hardware info, etc.
@@ -50,6 +51,14 @@ def parse_image_xml_lite(xml_element: ET.Element) -> dict:
         "xs": 1, "ys": 1, "zs": 1, "ts": 1, "tiles": 1,
         "channels": 1,
         "isrgb": False,
+        "channelResolution": [],
+        "channelbytesinc": [],
+        "lutname": [],
+        "xbytesinc": 0,
+        "ybytesinc": 0,
+        "zbytesinc": 0,
+        "tbytesinc": 0,
+        "tilesbytesinc": 0,
         # Pixel sizes (native units)
         "xres": 0.0, "yres": 0.0, "zres": 0.0,
         "resunit": "",
@@ -81,16 +90,29 @@ def parse_image_xml_lite(xml_element: ET.Element) -> dict:
                         meta["isrgb"] = True
                 except Exception:
                     pass
+                for ch_desc in ch_descs:
+                    meta["channelbytesinc"].append(_as_int(ch_desc.attrib.get("BytesInc")))
+                    meta["channelResolution"].append(_as_int(ch_desc.attrib.get("Resolution"), 8))
+                    lut = ch_desc.attrib.get("LUTName") or ""
+                    meta["lutname"].append(lut.lower())
             else:
                 # Sometimes Channels exists but is empty; look for a single ChannelDescription
                 one = img_desc.find(".//ChannelDescription")
                 if one is not None:
                     meta["channels"] = 1
+                    meta["channelbytesinc"].append(_as_int(one.attrib.get("BytesInc")))
+                    meta["channelResolution"].append(_as_int(one.attrib.get("Resolution"), 8))
+                    lut = one.attrib.get("LUTName") or ""
+                    meta["lutname"].append(lut.lower())
         else:
             # No Channels block; try a single ChannelDescription
             one = img_desc.find(".//ChannelDescription")
             if one is not None:
                 meta["channels"] = 1
+                meta["channelbytesinc"].append(_as_int(one.attrib.get("BytesInc")))
+                meta["channelResolution"].append(_as_int(one.attrib.get("Resolution"), 8))
+                lut = one.attrib.get("LUTName") or ""
+                meta["lutname"].append(lut.lower())
 
         # Dimensions and pixel size
         dims = img_desc.find("Dimensions")
@@ -108,6 +130,7 @@ def parse_image_xml_lite(xml_element: ET.Element) -> dict:
                     length = float(d.attrib.get("Length", "0"))
                 except Exception:
                     length = 0.0
+                bytes_inc = _as_int(d.attrib.get("BytesInc"))
                 unit = d.attrib.get("Unit", meta["resunit"]) or meta["resunit"]
                 if unit and not meta["resunit"]:
                     meta["resunit"] = unit
@@ -117,16 +140,21 @@ def parse_image_xml_lite(xml_element: ET.Element) -> dict:
                 if dim_id == 1:  # X
                     meta["xs"] = n
                     meta["xres"] = res
+                    meta["xbytesinc"] = bytes_inc
                 elif dim_id == 2:  # Y
                     meta["ys"] = n
                     meta["yres"] = res
+                    meta["ybytesinc"] = bytes_inc
                 elif dim_id == 3:  # Z
                     meta["zs"] = n
                     meta["zres"] = res
+                    meta["zbytesinc"] = bytes_inc
                 elif dim_id == 4:  # T
                     meta["ts"] = n
+                    meta["tbytesinc"] = bytes_inc
                 elif dim_id == 10:  # Tiles
                     meta["tiles"] = n
+                    meta["tilesbytesinc"] = bytes_inc
 
     # Convert to micrometers
     factor = _unit_to_um_factor(meta.get("resunit", ""))
@@ -145,5 +173,20 @@ def parse_image_xml_lite(xml_element: ET.Element) -> dict:
         "s": meta["tiles"],
         "isrgb": meta["isrgb"],
     }
+    while len(meta["channelbytesinc"]) < meta["channels"]:
+        meta["channelbytesinc"].append(0)
+    while len(meta["channelResolution"]) < meta["channels"]:
+        meta["channelResolution"].append(8)
+    while len(meta["lutname"]) < meta["channels"]:
+        meta["lutname"].append("")
 
     return meta
+
+
+def _as_int(value, default: int = 0) -> int:
+    try:
+        if value in (None, ""):
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default

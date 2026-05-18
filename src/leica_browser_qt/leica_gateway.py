@@ -39,6 +39,8 @@ class LeicaTreeNode:
     image_id: str | None = None
     context: LeicaImageContext | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    folder_metadata: dict[str, Any] | None = None
+    metadata_loaded: bool = False
     warning: str | None = None
     children: list["LeicaTreeNode"] = field(default_factory=list)
 
@@ -190,6 +192,7 @@ class LeicaGateway:
                         metadata=metadata,
                     ),
                     metadata=metadata,
+                    metadata_loaded=True,
                 )
             )
             return node
@@ -249,10 +252,11 @@ class LeicaGateway:
                         internal_path=internal_path,
                         image_id=str(uuid) if uuid else None,
                         metadata=child,
+                        folder_metadata=folder_metadata,
                     )
                 )
             else:
-                metadata = self._safe_image_metadata(container, str(uuid) if uuid else None, folder_metadata, child)
+                metadata = self._lightweight_image_metadata(container, child)
                 children.append(
                     LeicaTreeNode(
                         name=str(name),
@@ -269,9 +273,59 @@ class LeicaGateway:
                             metadata=metadata,
                         ),
                         metadata=metadata,
+                        folder_metadata=folder_metadata,
+                        metadata_loaded=False,
                     )
                 )
         return children
+
+    def hydrate_image_node(self, node: LeicaTreeNode) -> LeicaImageContext | None:
+        """Load full image metadata for an image node on demand.
+
+        Building large Leica trees is much faster when the tree is made from
+        the folder-level XML only. Full image metadata can require extra LIF
+        XML parsing or LOF reads, so defer it until the image is returned to
+        callers.
+        """
+
+        if node.context is None:
+            return None
+        if node.metadata_loaded:
+            return node.context
+        if node.path is None:
+            node.metadata_loaded = True
+            return node.context
+
+        metadata = self._safe_image_metadata(
+            node.path,
+            node.image_id,
+            node.folder_metadata or {},
+            node.metadata,
+        )
+        node.metadata = metadata
+        node.metadata_loaded = True
+        node.context = context_from_metadata(
+            name=node.name,
+            container_path=node.context.container_path,
+            internal_path=node.internal_path,
+            image_id=node.image_id,
+            kind=node.kind,
+            metadata=metadata,
+        )
+        return node.context
+
+    def _lightweight_image_metadata(
+        self,
+        container: Path,
+        source: dict[str, Any],
+    ) -> dict[str, Any]:
+        metadata = dict(source)
+        metadata.setdefault("filetype", container.suffix.lower())
+        if container.suffix.lower() == ".lif":
+            metadata.setdefault("LIFFile", str(container))
+        if container.suffix.lower() in {".xlef", ".lof"}:
+            metadata.setdefault("LOFFilePath", metadata.get("lof_file_path", str(container)))
+        return metadata
 
     def _safe_image_metadata(
         self,

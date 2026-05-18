@@ -13,6 +13,10 @@ _APP = None
 
 
 class StaticGateway(LeicaGateway):
+    def __init__(self):
+        super().__init__()
+        self.hydrate_calls = 0
+
     def container_node(self, path):
         path = Path(path)
         ctx1 = LeicaImageContext(
@@ -40,6 +44,10 @@ class StaticGateway(LeicaGateway):
                 LeicaTreeNode(name="Image 2", kind="lif-image", context=ctx2),
             ],
         )
+
+    def hydrate_image_node(self, node):
+        self.hydrate_calls += 1
+        return super().hydrate_image_node(node)
 
 
 def app():
@@ -80,6 +88,26 @@ def test_multi_select_returns_list(tmp_path):
         contexts = dialog.selected_contexts()
 
         assert [ctx.name for ctx in contexts] == ["Image 1", "Image 2"]
+    finally:
+        if dialog._preview_worker is not None:
+            dialog._preview_worker.wait(3000)
+        dialog.close()
+
+
+def test_selecting_image_does_not_hydrate_full_metadata(tmp_path):
+    app()
+    lif = tmp_path / "a.lif"
+    lif.write_bytes(b"fake")
+    gateway = StaticGateway()
+    dialog = LeicaBrowserDialog(roots=[tmp_path], selection_mode="single", gateway=gateway)
+    try:
+        dialog.load_file_images(lif)
+
+        root = dialog.tree_images.topLevelItem(0)
+        root.child(0).setSelected(True)
+        app().processEvents()
+
+        assert gateway.hydrate_calls == 0
     finally:
         if dialog._preview_worker is not None:
             dialog._preview_worker.wait(3000)

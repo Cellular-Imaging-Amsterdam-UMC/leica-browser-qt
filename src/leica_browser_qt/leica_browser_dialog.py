@@ -7,7 +7,7 @@ import traceback
 from pathlib import Path
 from typing import Iterable
 
-from PyQt6.QtCore import QSettings, Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QEventLoop, QSettings, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -19,11 +19,11 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QProgressDialog,
     QSizePolicy,
     QSplitter,
     QStyle,
-    QTableWidget,
-    QTableWidgetItem,
+    QTextEdit,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .leica_gateway import LEICA_EXTENSIONS, LeicaGateway, LeicaTreeNode
-from .metadata import metadata_rows
+from .metadata import format_metadata_summary
 from .models import LeicaImageContext, LeicaImageHandle
 from .preview import preview_png_from_metadata
 
@@ -63,6 +63,28 @@ class PreviewWorker(QThread):
             self.error.emit(self.job_id, traceback.format_exc())
 
 
+class MetadataHydrateWorker(QThread):
+    finishedHydrating = pyqtSignal(object, object)
+
+    def __init__(self, gateway: LeicaGateway, nodes: list[LeicaTreeNode]) -> None:
+        super().__init__()
+        self.gateway = gateway
+        self.nodes = nodes
+
+    def run(self) -> None:
+        try:
+            contexts = []
+            for node in self.nodes:
+                if self.isInterruptionRequested():
+                    return
+                context = self.gateway.hydrate_image_node(node)
+                if context is not None:
+                    contexts.append(context)
+            self.finishedHydrating.emit(contexts, None)
+        except Exception:
+            self.finishedHydrating.emit(None, traceback.format_exc())
+
+
 class LeicaBrowserDialog(QDialog):
     """Reusable ConvertLeicaQT-style browser for selecting Leica image contexts."""
 
@@ -81,9 +103,11 @@ class LeicaBrowserDialog(QDialog):
         self.gateway = gateway or LeicaGateway()
         self.selection_mode = selection_mode
         self._preview_worker: PreviewWorker | None = None
+        self._hydrate_worker: MetadataHydrateWorker | None = None
         self._stale_preview_workers: list[PreviewWorker] = []
         self._preview_job_id = 0
         self._current_file: Path | None = None
+        self._accepted_contexts: list[LeicaImageContext] | None = None
         self._settings = QSettings("NL-BioImaging", "leica-browser-qt")
         self._current_root = self._initial_root(root_list)
         self._initial_files = self._initial_file_roots(root_list)
@@ -172,11 +196,11 @@ class LeicaBrowserDialog(QDialog):
         self.preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         preview_layout.addWidget(self.preview_label, 2)
 
-        self.metadata_table = QTableWidget(0, 2)
-        self.metadata_table.setHorizontalHeaderLabels(["Key", "Value"])
-        self.metadata_table.horizontalHeader().setStretchLastSection(True)
-        self.metadata_table.verticalHeader().setVisible(False)
-        preview_layout.addWidget(self.metadata_table, 1)
+        self.metadata_text = QTextEdit()
+        self.metadata_text.setReadOnly(True)
+        self.metadata_text.setPlaceholderText("Image metadata will appear here")
+        self.metadata_text.setMaximumHeight(150)
+        preview_layout.addWidget(self.metadata_text, 0)
         right_split.addWidget(preview)
         right_split.setStretchFactor(0, 36)
         right_split.setStretchFactor(1, 64)
@@ -205,7 +229,7 @@ class LeicaBrowserDialog(QDialog):
         self.setStyleSheet(
             "QDialog { background: #202020; color: #f0f0f0; }"
             "QLabel { color: #f0f0f0; }"
-            "QTreeWidget, QTableWidget, QLineEdit {"
+            "QTreeWidget, QTableWidget, QTextEdit, QLineEdit {"
             "background: #2d2d2d; color: #f7f7f7; border: 1px solid #555;"
             "selection-background-color: #3d5068; }"
             "QHeaderView::section { background: #1e293b; color: #e2e8f0; border: 0; padding: 4px; }"
@@ -255,7 +279,7 @@ class LeicaBrowserDialog(QDialog):
         self.populate_fs_root()
         self.tree_images.clear()
         self._clear_preview()
-        self.metadata_table.setRowCount(0)
+        self.metadata_text.clear()
         self._current_file = None
         self._update_ok_state()
 
@@ -343,7 +367,7 @@ class LeicaBrowserDialog(QDialog):
         self._remember_root(container.parent if container.is_file() else container)
         self.tree_images.clear()
         self._clear_preview()
-        self.metadata_table.setRowCount(0)
+        self.metadata_text.clear()
         self.preview_label.setText(f"Loading {container.name}...")
         QApplication.processEvents()
 
@@ -398,9 +422,14 @@ class LeicaBrowserDialog(QDialog):
             item.addChild(warn)
 
     def selected_contexts(self) -> list[LeicaImageContext]:
+        if self._accepted_contexts is not None:
+            return list(self._accepted_contexts)
+        return self._selected_contexts(hydrate=True)
+
+    def _selected_contexts(self, *, hydrate: bool) -> list[LeicaImageContext]:
         contexts: list[LeicaImageContext] = []
         for item in self.tree_images.selectedItems():
-            context = item.data(0, CONTEXT_ROLE)
+            context = self._context_for_item(item, hydrate=hydrate)
             if isinstance(context, LeicaImageContext) and context not in contexts:
                 contexts.append(context)
         return contexts
@@ -410,17 +439,22 @@ class LeicaBrowserDialog(QDialog):
         return contexts[0] if contexts else None
 
     def on_image_selection_changed(self) -> None:
-        contexts = self.selected_contexts()
-        if len(contexts) == 1:
-            self.show_context(contexts[0])
+        items = [
+            item
+            for item in self.tree_images.selectedItems()
+            if self._context_for_item(item, hydrate=False)
+        ]
+        contexts = [self._context_for_item(item, hydrate=False) for item in items]
+        if len(items) == 1 and isinstance(contexts[0], LeicaImageContext):
+            self.show_context(items[0])
         elif len(contexts) > 1:
             self._cancel_preview_worker()
             self.preview_label.setText(f"{len(contexts)} images selected")
-            self.metadata_table.setRowCount(0)
+            self.metadata_text.clear()
         else:
             self._cancel_preview_worker()
             self._clear_preview()
-            self.metadata_table.setRowCount(0)
+            self.metadata_text.clear()
         self._update_ok_state()
 
     def on_image_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
@@ -466,17 +500,36 @@ class LeicaBrowserDialog(QDialog):
     # Preview and metadata
     # ------------------------------------------------------------------
 
-    def show_context(self, context: LeicaImageContext) -> None:
+    def show_context(self, item: QTreeWidgetItem) -> None:
+        context = self._context_for_item(item, hydrate=False)
+        if context is None:
+            return
         self._populate_metadata(context.metadata)
         self._start_preview(context)
 
     def _populate_metadata(self, metadata: dict) -> None:
-        rows = metadata_rows(metadata)
-        self.metadata_table.setRowCount(len(rows))
-        for row, (key, value) in enumerate(rows):
-            self.metadata_table.setItem(row, 0, QTableWidgetItem(key))
-            self.metadata_table.setItem(row, 1, QTableWidgetItem(value))
-        self.metadata_table.resizeColumnsToContents()
+        self.metadata_text.setPlainText(format_metadata_summary(metadata))
+
+    def _context_for_item(
+        self,
+        item: QTreeWidgetItem,
+        *,
+        hydrate: bool,
+    ) -> LeicaImageContext | None:
+        context = item.data(0, CONTEXT_ROLE)
+        if not isinstance(context, LeicaImageContext):
+            return None
+        if not hydrate:
+            return context
+
+        node = item.data(0, NODE_ROLE)
+        if isinstance(node, LeicaTreeNode) and not node.metadata_loaded:
+            loaded = self.gateway.hydrate_image_node(node)
+            if loaded is not None:
+                item.setData(0, CONTEXT_ROLE, loaded)
+                item.setData(0, NODE_ROLE, node)
+                context = loaded
+        return context
 
     def _start_preview(self, context: LeicaImageContext) -> None:
         self._cancel_preview_worker()
@@ -594,10 +647,68 @@ class LeicaBrowserDialog(QDialog):
         return all(marker.exists() for marker in markers)
 
     def _update_ok_state(self) -> None:
-        count = len(self.selected_contexts())
+        count = len(self._selected_contexts(hydrate=False))
         valid = count == 1 if self.selection_mode == "single" else count > 0
         self.ok_button.setEnabled(valid)
         self.status_label.setText(f"{count} image selected" if count == 1 else f"{count} images selected")
+
+    def _hydrate_selected_contexts_for_accept(self) -> bool:
+        items = [
+            item
+            for item in self.tree_images.selectedItems()
+            if isinstance(item.data(0, CONTEXT_ROLE), LeicaImageContext)
+        ]
+        nodes = [item.data(0, NODE_ROLE) for item in items]
+        image_nodes = [node for node in nodes if isinstance(node, LeicaTreeNode)]
+        if not image_nodes:
+            return True
+        if all(node.metadata_loaded for node in image_nodes):
+            self._accepted_contexts = [
+                context
+                for context in (self._context_for_item(item, hydrate=False) for item in items)
+                if context is not None
+            ]
+            return True
+
+        progress = QProgressDialog("Loading selected image metadata...", None, 0, 0, self)
+        progress.setWindowTitle("Preparing Selection")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.show()
+
+        loop = QEventLoop(self)
+        result: dict[str, object] = {"contexts": None, "error": None}
+        worker = MetadataHydrateWorker(self.gateway, image_nodes)
+        self._hydrate_worker = worker
+
+        def finish(contexts, error) -> None:
+            result["contexts"] = contexts
+            result["error"] = error
+            loop.quit()
+
+        worker.finishedHydrating.connect(finish)
+        worker.start()
+        loop.exec()
+        worker.wait(1500)
+        self._hydrate_worker = None
+        progress.close()
+
+        if result["error"]:
+            QMessageBox.warning(
+                self,
+                "Metadata Load Failed",
+                f"Could not load selected image metadata:\n{result['error']}",
+            )
+            return False
+
+        contexts = result["contexts"]
+        self._accepted_contexts = list(contexts) if isinstance(contexts, list) else []
+        for item, node in zip(items, image_nodes, strict=False):
+            if node.context is not None:
+                item.setData(0, CONTEXT_ROLE, node.context)
+                item.setData(0, NODE_ROLE, node)
+        return True
 
     def _cancel_preview_worker(self) -> None:
         if self._preview_worker is not None:
@@ -614,15 +725,18 @@ class LeicaBrowserDialog(QDialog):
             pass
 
     def _shutdown_workers(self) -> None:
-        workers = [self._preview_worker, *self._stale_preview_workers]
+        workers = [self._preview_worker, self._hydrate_worker, *self._stale_preview_workers]
         for worker in workers:
             if worker is not None and worker.isRunning():
                 worker.requestInterruption()
                 worker.wait(1500)
         self._preview_worker = None
+        self._hydrate_worker = None
         self._stale_preview_workers.clear()
 
     def accept(self) -> None:
+        if not self._hydrate_selected_contexts_for_accept():
+            return
         self._shutdown_workers()
         super().accept()
 
