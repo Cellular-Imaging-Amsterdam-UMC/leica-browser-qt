@@ -77,6 +77,14 @@ def _bounded_index(name: str, value: int, size: int) -> int:
     return index
 
 
+def _resolve_s(context: LeicaImageContext, s: int | None) -> int:
+    if s is not None:
+        return int(s)
+    if context.selected_s is not None:
+        return int(context.selected_s)
+    return 0
+
+
 def _plane_offset(
     metadata: dict[str, Any],
     *,
@@ -137,7 +145,8 @@ def read_leica_plane(
     z: int = 0,
     c: int = 0,
     t: int = 0,
-    tile: int = 0,
+    s: int | None = None,
+    tile: int | None = None,
 ) -> np.ndarray:
     """Read one real Leica plane as a 2-D NumPy array."""
 
@@ -155,6 +164,8 @@ def read_leica_plane(
     c = _bounded_index("channel", c, size_c)
     z = _bounded_index("z", z, size_z)
     t = _bounded_index("time", t, size_t)
+    if tile is None:
+        tile = _resolve_s(context, s)
     tile = _bounded_index("tile", tile, size_tiles)
 
     dtype = _dtype_from_bits(_channel_resolution(metadata, c))
@@ -197,7 +208,8 @@ def read_leica_stack(
     *,
     c: int = 0,
     t: int = 0,
-    tile: int = 0,
+    s: int | None = None,
+    tile: int | None = None,
     progress=None,
 ) -> np.ndarray:
     """Read one channel/timepoint stack as ``ZYX``."""
@@ -205,13 +217,19 @@ def read_leica_stack(
     size_z = max(_as_int(context.metadata.get("zs"), context.size_z or 1), 1)
     planes = []
     for z in range(size_z):
-        planes.append(read_leica_plane(context, z=z, c=c, t=t, tile=tile))
+        planes.append(read_leica_plane(context, z=z, c=c, t=t, s=s, tile=tile))
         if progress is not None:
             progress(z + 1, size_z)
     return np.stack(planes, axis=0)
 
 
-def read_leica_array(context: LeicaImageContext, *, tile: int = 0, progress=None) -> np.ndarray:
+def read_leica_array(
+    context: LeicaImageContext,
+    *,
+    s: int | None = None,
+    tile: int | None = None,
+    progress=None,
+) -> np.ndarray:
     """Read a full Leica image as a NumPy array with shape ``TCZYX``."""
 
     metadata = context.metadata
@@ -226,7 +244,7 @@ def read_leica_array(context: LeicaImageContext, *, tile: int = 0, progress=None
     for t in range(size_t):
         channel_stacks = []
         for c in range(size_c):
-            channel_stacks.append(read_leica_stack(context, c=c, t=t, tile=tile))
+            channel_stacks.append(read_leica_stack(context, c=c, t=t, s=s, tile=tile))
             done += 1
             if progress is not None:
                 progress(done, total)

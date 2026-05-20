@@ -115,6 +115,7 @@ def context_from_metadata(
         size_z=as_int(pick(metadata, "zs", "size_z", default=dims.get("z"))),
         size_c=as_int(pick(metadata, "channels", "size_c", default=dims.get("c"))),
         size_t=as_int(pick(metadata, "ts", "size_t", default=dims.get("t"))),
+        size_s=as_int(pick(metadata, "tiles", "size_s", default=dims.get("s"))),
         pixel_size_x_um=as_float(pick(metadata, "xres2", "pixel_size_x_um", "PhysicalSizeX")),
         pixel_size_y_um=as_float(pick(metadata, "yres2", "pixel_size_y_um", "PhysicalSizeY")),
         pixel_size_z_um=as_float(pick(metadata, "zres2", "pixel_size_z_um", "PhysicalSizeZ")),
@@ -148,6 +149,7 @@ def format_metadata_summary(metadata: dict[str, Any]) -> str:
     zs = pick(metadata, "zs", "size_z", default=dims.get("z"))
     ts = pick(metadata, "ts", "size_t", default=dims.get("t"))
     cs = pick(metadata, "channels", "size_c", default=dims.get("c"))
+    ss = pick(metadata, "tiles", "size_s", default=dims.get("s"))
 
     dims_parts = []
     if xs and ys:
@@ -158,6 +160,8 @@ def format_metadata_summary(metadata: dict[str, Any]) -> str:
         dims_parts.append(f"T={ts}")
     if cs:
         dims_parts.append(f"C={cs}")
+    if as_int(ss) and as_int(ss) > 1:
+        dims_parts.append(f"S={ss}")
 
     vx = pick(metadata, "xres2", "pixel_size_x_um", "PhysicalSizeX")
     vy = pick(metadata, "yres2", "pixel_size_y_um", "PhysicalSizeY")

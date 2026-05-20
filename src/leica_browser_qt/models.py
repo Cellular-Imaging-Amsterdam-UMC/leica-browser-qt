@@ -35,9 +35,11 @@ class LeicaImageContext:
     size_z: int | None = None
     size_c: int | None = None
     size_t: int | None = None
+    size_s: int | None = None
     pixel_size_x_um: float | None = None
     pixel_size_y_um: float | None = None
     pixel_size_z_um: float | None = None
+    selected_s: int | None = None
     channel_names: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -64,20 +66,20 @@ class LeicaImageHandle:
 
         return LeicaGateway().read_thumbnail(self.context, max_size=max_size)
 
-    def read_plane(self, z: int = 0, c: int = 0, t: int = 0):
+    def read_plane(self, z: int = 0, c: int = 0, t: int = 0, s: int | None = None):
         from .leica_gateway import LeicaGateway
 
-        return LeicaGateway().read_plane(self.context, z=z, c=c, t=t)
+        return LeicaGateway().read_plane(self.context, z=z, c=c, t=t, s=s)
 
-    def read_stack(self, c: int = 0, t: int = 0, progress=None):
+    def read_stack(self, c: int = 0, t: int = 0, s: int | None = None, progress=None):
         from .leica_pixels import read_leica_stack
 
-        return read_leica_stack(self.context, c=c, t=t, progress=progress)
+        return read_leica_stack(self.context, c=c, t=t, s=s, progress=progress)
 
-    def read_array(self):
+    def read_array(self, s: int | None = None):
         from .leica_gateway import LeicaGateway
 
-        return LeicaGateway().read_array(self.context)
+        return LeicaGateway().read_array(self.context, s=s)
 
     def read_lazy(self):
         raise NotImplementedError("Lazy Leica reading is not implemented in this first browser release.")

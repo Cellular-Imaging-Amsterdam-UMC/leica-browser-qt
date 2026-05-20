@@ -57,7 +57,11 @@ def create_png_from_metadata(metadata, preview_height=256, use_memmap=True):
         t = ts // 2
         basePos += int(t) * int(tbytesinc)
     if tiles and tiles > 1:
-        tile = tiles // 2
+        selected_s = metadata.get("selected_s")
+        if selected_s is None:
+            tile = tiles // 2
+        else:
+            tile = max(0, min(int(selected_s), int(tiles) - 1))
         basePos += int(tile) * int(tilesbytesinc)
 
     # Center slice selection for z
@@ -183,7 +187,9 @@ def create_preview_image(metadata, cache_folder, preview_height=256, use_memmap=
         uid = metadata.get("hash") or base or str(_uuid.uuid4())
 
     uuid = str(uid)
-    cache_filename = f"{uuid}_h{preview_height}.png"
+    selected_s = metadata.get("selected_s")
+    selected_s_suffix = "all" if selected_s is None else f"s{int(selected_s)}"
+    cache_filename = f"{uuid}_{selected_s_suffix}_h{preview_height}.png"
     cache_image_path = os.path.join(cache_folder, cache_filename)
 
     # Check if the cached image exists

@@ -357,7 +357,11 @@ class LeicaGateway:
     def read_thumbnail(self, context: LeicaImageContext, max_size: int = 512):
         from .preview import preview_png_from_metadata
 
-        preview_path = preview_png_from_metadata(context.metadata, preview_height=max_size)
+        preview_path = preview_png_from_metadata(
+            context.metadata,
+            selected_s=context.selected_s,
+            preview_height=max_size,
+        )
         try:
             import cv2
 
@@ -368,15 +372,22 @@ class LeicaGateway:
             pass
         return np.asarray(preview_path)
 
-    def read_plane(self, context: LeicaImageContext, z: int = 0, c: int = 0, t: int = 0):
+    def read_plane(
+        self,
+        context: LeicaImageContext,
+        z: int = 0,
+        c: int = 0,
+        t: int = 0,
+        s: int | None = None,
+    ):
         from .leica_pixels import read_leica_plane
 
-        return read_leica_plane(context, z=z, c=c, t=t)
+        return read_leica_plane(context, z=z, c=c, t=t, s=s)
 
-    def read_array(self, context: LeicaImageContext):
+    def read_array(self, context: LeicaImageContext, s: int | None = None):
         from .leica_pixels import read_leica_array
 
-        return read_leica_array(context)
+        return read_leica_array(context, s=s)
 
     @staticmethod
     def _ignore_name(name: str) -> bool:

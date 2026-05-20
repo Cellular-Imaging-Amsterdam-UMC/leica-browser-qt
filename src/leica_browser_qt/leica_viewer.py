@@ -369,6 +369,20 @@ class LeicaViewerWindow(QMainWindow):
         body.addLayout(side, 0)
         main_lay.addLayout(body, 1)
 
+        self._s_controls = QWidget()
+        s_row = QHBoxLayout(self._s_controls)
+        s_row.setContentsMargins(0, 0, 0, 0)
+        s_row.addWidget(QLabel("S"))
+        self._s_slider = QSlider(Qt.Orientation.Horizontal)
+        self._s_slider.setRange(0, 0)
+        self._s_slider.valueChanged.connect(self._update_viewer)
+        s_row.addWidget(self._s_slider, 1)
+        self._s_label = QLabel("0/0")
+        self._s_label.setObjectName("hint")
+        s_row.addWidget(self._s_label)
+        self._s_controls.setVisible(False)
+        main_lay.addWidget(self._s_controls)
+
         bottom = QHBoxLayout()
         bottom.addWidget(QLabel("T"))
         self._t_slider = QSlider(Qt.Orientation.Horizontal)
@@ -431,6 +445,8 @@ class LeicaViewerWindow(QMainWindow):
     def _configure_dimension_controls(self) -> None:
         z_count = max(int(self._metadata.get("size_z") or 1), 1)
         t_count = max(int(self._metadata.get("size_t") or 1), 1)
+        s_count = max(int(self._metadata.get("size_s") or 1), 1)
+        selected_s = self._context.selected_s if self._context is not None else None
         self._z_slider.blockSignals(True)
         self._z_slider.setRange(0, z_count - 1)
         self._z_slider.setValue(min(z_count // 2, z_count - 1))
@@ -439,6 +455,11 @@ class LeicaViewerWindow(QMainWindow):
         self._t_slider.setRange(0, t_count - 1)
         self._t_slider.setValue(0)
         self._t_slider.blockSignals(False)
+        self._s_slider.blockSignals(True)
+        self._s_slider.setRange(0, s_count - 1)
+        self._s_slider.setValue(selected_s if selected_s is not None else min(s_count // 2, s_count - 1))
+        self._s_slider.blockSignals(False)
+        self._s_controls.setVisible(s_count > 1 and selected_s is None)
         self._refresh_dimension_labels()
 
     def _populate_metadata_table(self) -> None:
@@ -461,10 +482,11 @@ class LeicaViewerWindow(QMainWindow):
 
         z = self._z_slider.value()
         t = self._t_slider.value()
+        s = self._current_s_value()
         mode = self._proj_combo.currentText()
         slices = []
         for channel_index in active:
-            stack = self._provider.get_stack(channel_index, t)
+            stack = self._provider.get_stack(channel_index, t, s=s)
             plane = _project_stack(stack, mode, z)
             lo, hi = self._contrast_limits(plane)
             color = self._channel_colors[channel_index % len(self._channel_colors)]
@@ -474,7 +496,7 @@ class LeicaViewerWindow(QMainWindow):
         self._viewer.set_pixmap(pixmap)
         self._status.showMessage(
             f"{self._metadata.get('name', '')}  X={self._metadata.get('size_x')} "
-            f"Y={self._metadata.get('size_y')} Z={z + 1} T={t + 1}"
+            f"Y={self._metadata.get('size_y')} Z={z + 1} T={t + 1}{self._format_s_status(s)}"
         )
 
     def _contrast_limits(self, arr: np.ndarray) -> tuple[float, float]:
@@ -488,6 +510,26 @@ class LeicaViewerWindow(QMainWindow):
     def _refresh_dimension_labels(self) -> None:
         self._z_label.setText(f"{self._z_slider.value() + 1}/{self._z_slider.maximum() + 1}")
         self._t_label.setText(f"{self._t_slider.value() + 1}/{self._t_slider.maximum() + 1}")
+        self._s_label.setText(f"{self._current_s_value() + 1}/{self._s_slider.maximum() + 1}")
+
+    def _current_s_value(self) -> int:
+        if self._context is not None and self._context.selected_s is not None:
+            return int(self._context.selected_s)
+        return self._s_slider.value()
+
+    def _format_s_status(self, s: int) -> str:
+        size_s = int(self._metadata.get("size_s") or 1)
+        if size_s <= 1 and (self._context is None or self._context.selected_s is None):
+            return ""
+        suffix = f" S={s + 1}"
+        tile_positions = self._metadata.get("source_metadata", {}).get("tile_positions")
+        if isinstance(tile_positions, list) and 0 <= s < len(tile_positions):
+            tile = tile_positions[s]
+            pos_x = tile.get("PosX")
+            pos_y = tile.get("PosY")
+            if pos_x is not None and pos_y is not None:
+                suffix += f" ({pos_x:.3f}, {pos_y:.3f})"
+        return suffix
 
     def _viewer_fit_later(self) -> None:
         QTimer.singleShot(0, self._viewer.fit_in_view)

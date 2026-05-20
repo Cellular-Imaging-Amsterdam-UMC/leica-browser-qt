@@ -36,10 +36,16 @@ def _load_create_preview_image():
 def preview_png_from_metadata(
     metadata: dict[str, Any],
     *,
+    selected_s: int | None = None,
     preview_height: int = 512,
     use_memmap: bool = True,
     max_cache_size: int = 500,
 ) -> Path:
+    metadata = dict(metadata)
+    if selected_s is None:
+        metadata.pop("selected_s", None)
+    else:
+        metadata["selected_s"] = int(selected_s)
     create_preview_image = _load_create_preview_image()
     if create_preview_image is None:
         raise RuntimeError(

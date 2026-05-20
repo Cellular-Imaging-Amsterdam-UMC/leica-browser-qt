@@ -42,3 +42,61 @@ def test_viewer_instantiates_without_real_leica_data():
         assert len(win._channel_buttons) == 2
     finally:
         win.close()
+
+
+def test_viewer_shows_s_slider_for_unpinned_multi_s_context():
+    app()
+    ctx = LeicaImageContext(
+        name="Preview",
+        container_path=Path("sample.lif"),
+        internal_path="sample.lif/Preview",
+        image_id="preview",
+        kind="lif-image",
+        size_x=128,
+        size_y=96,
+        size_z=3,
+        size_c=2,
+        size_t=1,
+        size_s=5,
+        pixel_size_x_um=0.25,
+        channel_names=["Green", "Magenta"],
+        metadata={"xs": 128, "ys": 96, "zs": 3, "channels": 2, "tiles": 5},
+    )
+
+    win = LeicaViewerWindow(ctx)
+    try:
+        app().processEvents()
+        assert not win._s_controls.isHidden()
+        assert win._s_slider.maximum() == 4
+        assert win._s_slider.value() == 2
+    finally:
+        win.close()
+
+
+def test_viewer_hides_s_slider_for_browser_pinned_s_context():
+    app()
+    ctx = LeicaImageContext(
+        name="Preview",
+        container_path=Path("sample.lif"),
+        internal_path="sample.lif/Preview",
+        image_id="preview",
+        kind="lif-image",
+        size_x=128,
+        size_y=96,
+        size_z=3,
+        size_c=2,
+        size_t=1,
+        size_s=5,
+        selected_s=3,
+        pixel_size_x_um=0.25,
+        channel_names=["Green", "Magenta"],
+        metadata={"xs": 128, "ys": 96, "zs": 3, "channels": 2, "tiles": 5},
+    )
+
+    win = LeicaViewerWindow(ctx)
+    try:
+        app().processEvents()
+        assert win._s_controls.isHidden()
+        assert win._current_s_value() == 3
+    finally:
+        win.close()

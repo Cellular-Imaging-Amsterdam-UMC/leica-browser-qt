@@ -67,6 +67,8 @@ def get_context_metadata(context: LeicaImageContext) -> dict[str, Any]:
         "size_z": context.size_z or 1,
         "size_c": max(size_c, 1),
         "size_t": context.size_t or 1,
+        "size_s": context.size_s or 1,
+        "selected_s": context.selected_s,
         "pixel_type": context.metadata.get("pixel_type", "u1"),
         "pixel_size_x": context.pixel_size_x_um,
         "pixel_size_y": context.pixel_size_y_um,
@@ -87,7 +89,7 @@ class LeicaPreviewPlaneProvider:
     def __init__(self, context: LeicaImageContext, max_cache_items: int = 64) -> None:
         self.context = context
         self._meta = get_context_metadata(context)
-        self._cache: OrderedDict[tuple[int, int, int], np.ndarray] = OrderedDict()
+        self._cache: OrderedDict[tuple[int, int, int, int], np.ndarray] = OrderedDict()
         self._max_cache_items = max_cache_items
         self._preview_rgb: np.ndarray | None = None
 
@@ -100,14 +102,15 @@ class LeicaPreviewPlaneProvider:
             self._meta["size_y"] = self._meta.get("size_y") or height
         return self._meta
 
-    def get_plane(self, c: int, z: int, t: int = 0) -> np.ndarray:
-        key = (c, z, t)
+    def get_plane(self, c: int, z: int, t: int = 0, s: int | None = None) -> np.ndarray:
+        resolved_s = self.context.selected_s if s is None else s
+        key = (c, z, t, int(resolved_s or 0))
         if key in self._cache:
             self._cache.move_to_end(key)
             return self._cache[key]
 
         try:
-            arr = self.context.open().read_plane(z=z, c=c, t=t)
+            arr = self.context.open().read_plane(z=z, c=c, t=t, s=resolved_s)
             arr = np.asarray(arr)
             if arr.ndim == 3:
                 arr = arr[..., min(c, arr.shape[-1] - 1)]
@@ -115,11 +118,11 @@ class LeicaPreviewPlaneProvider:
             arr = self._preview_channel(c)
         return self._remember(key, arr)
 
-    def get_stack(self, c: int, t: int = 0, progress=None) -> np.ndarray:
+    def get_stack(self, c: int, t: int = 0, s: int | None = None, progress=None) -> np.ndarray:
         z_count = max(int(self.metadata.get("size_z") or 1), 1)
         planes = []
         for z in range(z_count):
-            planes.append(self.get_plane(c, z, t))
+            planes.append(self.get_plane(c, z, t, s=s))
             if progress is not None:
                 progress(z + 1, z_count)
         return np.stack(planes, axis=0)
@@ -134,7 +137,11 @@ class LeicaPreviewPlaneProvider:
         if self._preview_rgb is not None:
             return
         try:
-            png = preview_png_from_metadata(self.context.metadata, preview_height=768)
+            png = preview_png_from_metadata(
+                self.context.metadata,
+                selected_s=self.context.selected_s,
+                preview_height=768,
+            )
             image = QImage(str(png)).convertToFormat(QImage.Format.Format_RGB888)
             width = image.width()
             height = image.height()
@@ -158,7 +165,7 @@ class LeicaPreviewPlaneProvider:
         blue = np.broadcast_to((1 - x) * 120 + 40, (height, width)).astype(np.uint8)
         return np.dstack([red, green, blue])
 
-    def _remember(self, key: tuple[int, int, int], arr: np.ndarray) -> np.ndarray:
+    def _remember(self, key: tuple[int, int, int, int], arr: np.ndarray) -> np.ndarray:
         self._cache[key] = arr
         self._cache.move_to_end(key)
         while len(self._cache) > self._max_cache_items:

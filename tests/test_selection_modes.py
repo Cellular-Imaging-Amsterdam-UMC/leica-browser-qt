@@ -3,14 +3,39 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
+from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import QApplication
 
 from leica_browser_qt import LeicaBrowserDialog, LeicaGateway
+from leica_browser_qt._convertleica_backend import CreatePreview
 from leica_browser_qt.leica_browser_dialog import MAX_RECENT_ROOTS, RECENT_ROOTS_KEY
 from leica_browser_qt.leica_gateway import LeicaTreeNode
 from leica_browser_qt.models import LeicaImageContext
 
 _APP = None
+
+
+@pytest.fixture(autouse=True)
+def restore_browser_settings():
+    settings = QSettings("NL-BioImaging", "leica-browser-qt")
+    had_last_root = settings.contains("last_root")
+    last_root = settings.value("last_root", "", str)
+    had_recent_roots = settings.contains(RECENT_ROOTS_KEY)
+    recent_roots = settings.value(RECENT_ROOTS_KEY, [])
+
+    yield
+
+    if had_last_root:
+        settings.setValue("last_root", last_root)
+    else:
+        settings.remove("last_root")
+
+    if had_recent_roots:
+        settings.setValue(RECENT_ROOTS_KEY, recent_roots)
+    else:
+        settings.remove(RECENT_ROOTS_KEY)
+    settings.sync()
 
 
 class StaticGateway(LeicaGateway):
@@ -94,6 +119,26 @@ class SingleNestedImageGateway(StaticGateway):
                     children=[LeicaTreeNode(name="Nested Image", kind="lif-image", context=ctx)],
                 )
             ],
+        )
+
+
+class MultiSImageGateway(StaticGateway):
+    def container_node(self, path):
+        path = Path(path)
+        ctx = LeicaImageContext(
+            name="Positions",
+            container_path=path,
+            internal_path=f"{path.name}/Positions",
+            image_id="positions",
+            kind="lif-image",
+            size_s=5,
+            metadata={"xs": 1, "ys": 1, "tiles": 5},
+        )
+        return LeicaTreeNode(
+            name=path.name,
+            kind="container",
+            path=path,
+            children=[LeicaTreeNode(name="Positions", kind="lif-image", context=ctx)],
         )
 
 
@@ -286,4 +331,113 @@ def test_recent_folder_selection_changes_root(tmp_path):
         assert dialog.tree_fs.topLevelItem(0).text(0) == str(second)
     finally:
         dialog._settings.remove(RECENT_ROOTS_KEY)
+        dialog.close()
+
+
+def test_single_multi_s_image_exposes_browser_s_controls(tmp_path):
+    app()
+    lif = tmp_path / "a.lif"
+    lif.write_bytes(b"fake")
+    dialog = LeicaBrowserDialog(roots=[tmp_path], selection_mode="single", gateway=MultiSImageGateway())
+    try:
+        dialog.load_file_images(lif)
+
+        assert not dialog._s_controls.isHidden()
+        assert dialog._s_mode_combo.currentText() == "All"
+        assert dialog._s_mode_combo.minimumWidth() >= 88
+        assert not dialog._s_slider.isEnabled()
+        assert dialog._s_slider.singleStep() == 1
+        assert dialog._s_slider.pageStep() == 1
+        assert dialog._s_slider.maximum() == 4
+        assert dialog._s_spin.maximum() == 5
+    finally:
+        if dialog._preview_worker is not None:
+            dialog._preview_worker.wait(3000)
+        dialog.close()
+
+
+def test_browser_fixed_s_is_returned_on_selected_context(tmp_path):
+    app()
+    lif = tmp_path / "a.lif"
+    lif.write_bytes(b"fake")
+    dialog = LeicaBrowserDialog(roots=[tmp_path], selection_mode="single", gateway=MultiSImageGateway())
+    try:
+        dialog.load_file_images(lif)
+
+        dialog._s_mode_combo.setCurrentText("Fixed")
+        dialog._s_spin.setValue(4)
+
+        context = dialog.selected_context()
+
+        assert context is not None
+        assert context.selected_s == 3
+        assert dialog._s_slider.value() == 3
+    finally:
+        if dialog._preview_worker is not None:
+            dialog._preview_worker.wait(3000)
+        dialog.close()
+
+
+def test_preview_cache_filename_varies_with_selected_s(tmp_path, monkeypatch):
+    def fake_create_png_from_metadata(metadata, preview_height=256, use_memmap=True):
+        temp_path = tmp_path / f"temp-{metadata.get('selected_s', 'all')}.png"
+        temp_path.write_bytes(b"png")
+        return str(temp_path)
+
+    monkeypatch.setattr(CreatePreview, "create_png_from_metadata", fake_create_png_from_metadata)
+    monkeypatch.setattr(CreatePreview.cv2, "imread", lambda path: b"image")
+    monkeypatch.setattr(
+        CreatePreview.cv2,
+        "imwrite",
+        lambda path, image: Path(path).write_bytes(b"cached") or True,
+    )
+
+    base_metadata = {
+        "uuid": "img-1",
+        "LOFFilePath": "sample.lof",
+        "xs": 10,
+        "ys": 10,
+    }
+
+    all_path = CreatePreview.create_preview_image(dict(base_metadata), str(tmp_path), preview_height=128)
+    s0_path = CreatePreview.create_preview_image(
+        {**base_metadata, "selected_s": 0},
+        str(tmp_path),
+        preview_height=128,
+    )
+    s1_path = CreatePreview.create_preview_image(
+        {**base_metadata, "selected_s": 1},
+        str(tmp_path),
+        preview_height=128,
+    )
+
+    assert all_path != s0_path
+    assert s0_path != s1_path
+
+
+def test_loading_file_updates_last_root_and_recent_roots(tmp_path):
+    app()
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    lif = data_root / "a.lif"
+    lif.write_bytes(b"fake")
+
+    dialog = LeicaBrowserDialog(roots=[tmp_path], selection_mode="single", gateway=StaticGateway())
+    try:
+        dialog._settings.remove(RECENT_ROOTS_KEY)
+        dialog._recent_roots = []
+        dialog._refresh_recent_roots_combo()
+
+        dialog.load_file_images(lif)
+
+        stored_last_root = dialog._settings.value("last_root", "", str)
+        stored_recent_roots = list(dialog._settings.value(RECENT_ROOTS_KEY, []))
+
+        assert stored_last_root == str(data_root)
+        assert stored_recent_roots == [str(data_root)]
+        assert [str(root) for root in dialog._recent_roots] == [str(data_root)]
+    finally:
+        dialog._settings.remove(RECENT_ROOTS_KEY)
+        if dialog._preview_worker is not None:
+            dialog._preview_worker.wait(3000)
         dialog.close()

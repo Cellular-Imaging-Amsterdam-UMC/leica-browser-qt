@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import os
 import sys
@@ -22,6 +23,8 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QProgressDialog,
     QSizePolicy,
+    QSlider,
+    QSpinBox,
     QSplitter,
     QStyle,
     QTextEdit,
@@ -58,7 +61,11 @@ class PreviewWorker(QThread):
             for height in self.heights:
                 if self.isInterruptionRequested():
                     break
-                path = preview_png_from_metadata(self.context.metadata, preview_height=height)
+                path = preview_png_from_metadata(
+                    self.context.metadata,
+                    selected_s=self.context.selected_s,
+                    preview_height=height,
+                )
                 self.previewReady.emit(self.job_id, height, str(path))
                 if height != self.heights[-1]:
                     QThread.msleep(120)
@@ -111,6 +118,7 @@ class LeicaBrowserDialog(QDialog):
         self._preview_job_id = 0
         self._current_file: Path | None = None
         self._accepted_contexts: list[LeicaImageContext] | None = None
+        self._browser_s_selection: dict[str, int | None] = {}
         self._settings = QSettings("NL-BioImaging", "leica-browser-qt")
         self._current_root = self._initial_root(root_list)
         self._initial_files = self._initial_file_roots(root_list)
@@ -210,6 +218,32 @@ class LeicaBrowserDialog(QDialog):
         self.preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         preview_layout.addWidget(self.preview_label, 2)
 
+        self._s_controls = QWidget()
+        s_controls_layout = QHBoxLayout(self._s_controls)
+        s_controls_layout.setContentsMargins(0, 0, 0, 0)
+        s_controls_layout.addWidget(QLabel("S"))
+        self._s_mode_combo = QComboBox()
+        self._s_mode_combo.addItems(["All", "Fixed"])
+        self._s_mode_combo.setMinimumContentsLength(7)
+        self._s_mode_combo.setMinimumWidth(88)
+        self._s_mode_combo.currentIndexChanged.connect(self._on_browser_s_mode_changed)
+        s_controls_layout.addWidget(self._s_mode_combo)
+        self._s_slider = QSlider(Qt.Orientation.Horizontal)
+        self._s_slider.setRange(0, 0)
+        self._s_slider.setSingleStep(1)
+        self._s_slider.setPageStep(1)
+        self._s_slider.valueChanged.connect(self._on_browser_s_slider_changed)
+        s_controls_layout.addWidget(self._s_slider, 1)
+        self._s_spin = QSpinBox()
+        self._s_spin.setRange(1, 1)
+        self._s_spin.setMinimumWidth(72)
+        self._s_spin.valueChanged.connect(self._on_browser_s_spin_changed)
+        s_controls_layout.addWidget(self._s_spin)
+        self._s_value_label = QLabel("All")
+        s_controls_layout.addWidget(self._s_value_label)
+        self._s_controls.setVisible(False)
+        preview_layout.addWidget(self._s_controls, 0)
+
         self.metadata_text = QTextEdit()
         self.metadata_text.setReadOnly(True)
         self.metadata_text.setPlaceholderText("Image metadata will appear here")
@@ -286,7 +320,6 @@ class LeicaBrowserDialog(QDialog):
         if chosen:
             self._current_root = Path(chosen)
             self._remember_root(self._current_root)
-            self._remember_recent_root(self._current_root)
             self.lbl_root.setText(f"Root: {self._current_root}")
             self.refresh()
 
@@ -475,8 +508,10 @@ class LeicaBrowserDialog(QDialog):
         contexts: list[LeicaImageContext] = []
         for item in self.tree_images.selectedItems():
             context = self._context_for_item(item, hydrate=hydrate)
-            if isinstance(context, LeicaImageContext) and context not in contexts:
-                contexts.append(context)
+            if isinstance(context, LeicaImageContext):
+                context = self._derive_context_with_browser_selection(context)
+                if context not in contexts:
+                    contexts.append(context)
         return contexts
 
     def selected_context(self) -> LeicaImageContext | None:
@@ -490,6 +525,7 @@ class LeicaBrowserDialog(QDialog):
             if self._context_for_item(item, hydrate=False)
         ]
         contexts = [self._context_for_item(item, hydrate=False) for item in items]
+        self._update_browser_s_controls(items[0] if len(items) == 1 else None)
         if len(items) == 1 and isinstance(contexts[0], LeicaImageContext):
             self.show_context(items[0])
         elif len(contexts) > 1:
@@ -549,6 +585,7 @@ class LeicaBrowserDialog(QDialog):
         context = self._context_for_item(item, hydrate=False)
         if context is None:
             return
+        context = self._derive_context_with_browser_selection(context)
         self._populate_metadata(context.metadata)
         self._start_preview(context)
 
@@ -622,6 +659,129 @@ class LeicaBrowserDialog(QDialog):
             return [max(steps)]
         return steps
 
+    def _context_selection_key(self, context: LeicaImageContext) -> str:
+        return f"{context.container_path}|{context.internal_path}"
+
+    def _selected_s_for_context(self, context: LeicaImageContext) -> int | None:
+        key = self._context_selection_key(context)
+        if key in self._browser_s_selection:
+            return self._browser_s_selection[key]
+        return context.selected_s
+
+    def _derive_context_with_browser_selection(self, context: LeicaImageContext) -> LeicaImageContext:
+        selected_s = self._selected_s_for_context(context)
+        metadata = dict(context.metadata)
+        if selected_s is None:
+            metadata.pop("selected_s", None)
+        else:
+            metadata["selected_s"] = int(selected_s)
+        return replace(context, selected_s=selected_s, metadata=metadata)
+
+    def _set_browser_s_for_context(self, context: LeicaImageContext, selected_s: int | None) -> None:
+        key = self._context_selection_key(context)
+        if selected_s == context.selected_s:
+            self._browser_s_selection.pop(key, None)
+        else:
+            self._browser_s_selection[key] = selected_s
+
+    def _current_single_selected_item(self) -> QTreeWidgetItem | None:
+        items = self.tree_images.selectedItems()
+        if len(items) != 1:
+            return None
+        if not isinstance(self._context_for_item(items[0], hydrate=False), LeicaImageContext):
+            return None
+        return items[0]
+
+    def _update_browser_s_controls(self, item: QTreeWidgetItem | None) -> None:
+        context = self._context_for_item(item, hydrate=False) if item is not None else None
+        size_s = context.size_s if isinstance(context, LeicaImageContext) else None
+        if not isinstance(context, LeicaImageContext) or (size_s or 1) <= 1:
+            self._s_controls.setVisible(False)
+            return
+
+        current_selected_s = self._selected_s_for_context(context)
+        fixed = current_selected_s is not None
+        slider_value = current_selected_s if current_selected_s is not None else max((size_s or 1) // 2, 0)
+
+        self._s_controls.setVisible(True)
+        self._s_mode_combo.blockSignals(True)
+        self._s_slider.blockSignals(True)
+        self._s_spin.blockSignals(True)
+        self._s_mode_combo.setCurrentIndex(1 if fixed else 0)
+        self._s_slider.setRange(0, (size_s or 1) - 1)
+        self._s_slider.setSingleStep(1)
+        self._s_slider.setPageStep(1)
+        self._s_slider.setValue(slider_value)
+        self._s_slider.setEnabled(fixed)
+        self._s_spin.setRange(1, size_s or 1)
+        self._s_spin.setValue(slider_value + 1)
+        self._s_spin.setEnabled(fixed)
+        self._s_mode_combo.blockSignals(False)
+        self._s_slider.blockSignals(False)
+        self._s_spin.blockSignals(False)
+        self._refresh_browser_s_label(size_s or 1, current_selected_s, slider_value)
+
+    def _refresh_browser_s_label(self, size_s: int, selected_s: int | None, slider_value: int | None = None) -> None:
+        if selected_s is None:
+            self._s_value_label.setText(f"All ({max(size_s // 2, 0) + 1}/{size_s} preview)")
+            return
+        value = selected_s if slider_value is None else slider_value
+        self._s_value_label.setText(f"{value + 1}/{size_s}")
+
+    def _apply_browser_fixed_s_value(self, context: LeicaImageContext, value: int) -> None:
+        self._set_browser_s_for_context(context, value)
+        self._s_slider.blockSignals(True)
+        self._s_spin.blockSignals(True)
+        self._s_slider.setValue(value)
+        self._s_spin.setValue(value + 1)
+        self._s_slider.blockSignals(False)
+        self._s_spin.blockSignals(False)
+        self._refresh_browser_s_label(context.size_s or 1, value, value)
+        self._refresh_selected_preview()
+
+    def _refresh_selected_preview(self) -> None:
+        item = self._current_single_selected_item()
+        if item is not None:
+            self.show_context(item)
+
+    def _on_browser_s_mode_changed(self, _index: int) -> None:
+        item = self._current_single_selected_item()
+        if item is None:
+            return
+        context = self._context_for_item(item, hydrate=False)
+        if context is None:
+            return
+        if self._s_mode_combo.currentText() == "All":
+            self._set_browser_s_for_context(context, None)
+            self._s_slider.setEnabled(False)
+            self._s_spin.setEnabled(False)
+            self._refresh_browser_s_label(context.size_s or 1, None)
+        else:
+            value = self._s_slider.value()
+            self._s_slider.setEnabled(True)
+            self._s_spin.setEnabled(True)
+            self._apply_browser_fixed_s_value(context, value)
+            return
+        self._refresh_selected_preview()
+
+    def _on_browser_s_slider_changed(self, value: int) -> None:
+        item = self._current_single_selected_item()
+        if item is None:
+            return
+        context = self._context_for_item(item, hydrate=False)
+        if context is None or self._s_mode_combo.currentText() != "Fixed":
+            return
+        self._apply_browser_fixed_s_value(context, value)
+
+    def _on_browser_s_spin_changed(self, value: int) -> None:
+        item = self._current_single_selected_item()
+        if item is None:
+            return
+        context = self._context_for_item(item, hydrate=False)
+        if context is None or self._s_mode_combo.currentText() != "Fixed":
+            return
+        self._apply_browser_fixed_s_value(context, value - 1)
+
     # ------------------------------------------------------------------
     # Icons and helpers
     # ------------------------------------------------------------------
@@ -654,6 +814,7 @@ class LeicaBrowserDialog(QDialog):
     def _remember_root(self, root: Path) -> None:
         if self._is_usable_root(root):
             self._settings.setValue("last_root", str(root))
+            self._remember_recent_root(root)
 
     def _load_recent_roots(self) -> list[Path]:
         raw_roots = self._settings.value(RECENT_ROOTS_KEY, [])
@@ -770,11 +931,7 @@ class LeicaBrowserDialog(QDialog):
         if not image_nodes:
             return True
         if all(node.metadata_loaded for node in image_nodes):
-            self._accepted_contexts = [
-                context
-                for context in (self._context_for_item(item, hydrate=False) for item in items)
-                if context is not None
-            ]
+            self._accepted_contexts = self._selected_contexts(hydrate=False)
             return True
 
         progress = QProgressDialog("Loading selected image metadata...", None, 0, 0, self)
@@ -809,12 +966,11 @@ class LeicaBrowserDialog(QDialog):
             )
             return False
 
-        contexts = result["contexts"]
-        self._accepted_contexts = list(contexts) if isinstance(contexts, list) else []
         for item, node in zip(items, image_nodes, strict=False):
             if node.context is not None:
                 item.setData(0, CONTEXT_ROLE, node.context)
                 item.setData(0, NODE_ROLE, node)
+        self._accepted_contexts = self._selected_contexts(hydrate=False)
         return True
 
     def _cancel_preview_worker(self) -> None:
